@@ -9,7 +9,7 @@ import time
 from typing import Iterable, List
 
 from src.config import MAX_DELAY, MIN_DELAY
-from src.fetch_game import fetch_page
+from src.fetch_game import fetch_summary
 from src.parse_game import parse_game
 
 
@@ -34,12 +34,12 @@ def save_json(game_data: dict) -> pathlib.Path:
 def scrape_single_game(game_id: str) -> dict:
     """
     High-level helper for ONE game:
-    1. Fetch HTML from ESPN.
+    1. Fetch JSON summary from ESPN.
     2. Parse it into a clean dict.
     3. Save it to data/<game_id>.json.
     """
-    html = fetch_page(game_id)
-    game_data = parse_game(html, game_id)
+    summary = fetch_summary(game_id)
+    game_data = parse_game(summary, game_id)
     save_json(game_data)
     return game_data
 

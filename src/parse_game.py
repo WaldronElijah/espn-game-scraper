@@ -1,8 +1,8 @@
 """
-Parse a single ESPN NBA game page HTML into a clean Python dictionary.
+Parse a single ESPN NBA game summary JSON into a clean Python dictionary.
 
-We try to avoid scraping fragile CSS classes. Instead, we extract the
-structured JSON blob ESPN embeds in a <script> tag and walk that.
+We no longer scrape HTML or <script> tags. Instead, we call the official
+ESPN summary endpoint (see fetch_game.fetch_summary) and walk that JSON.
 
 Main output fields:
 - game_id
@@ -19,55 +19,7 @@ Main output fields:
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Dict, List, Mapping, Optional
-
-from bs4 import BeautifulSoup
-
-
-# ESPN stores game data in a script that assigns to window['__espnfitt__'].
-# Fragility: if ESPN renames this key, all parsing below will fail.
-SCRIPT_KEY = "__espnfitt__"
-
-
-def _extract_espn_json(html: str) -> Dict[str, Any]:
-    """
-    Locate and decode the JSON blob from the ESPN game page HTML.
-
-    Strategy:
-    1. Parse HTML with BeautifulSoup.
-    2. Find a <script> tag whose contents mention "__espnfitt__".
-    3. Use a regex to pull out the JSON object assigned to window['__espnfitt__'].
-
-    Fragility:
-    - If ESPN stops embedding this script, this function raises ValueError.
-    - If they change the assignment format, the regex may fail.
-    """
-    soup = BeautifulSoup(html, "lxml")
-
-    script_tag = soup.find(
-        "script",
-        string=lambda s: isinstance(s, str) and SCRIPT_KEY in s,
-    )
-    if not script_tag:
-        raise ValueError("Could not find ESPN data script containing __espnfitt__")
-
-    script_text = script_tag.string or script_tag.get_text("", strip=False)
-
-    # Match patterns like:
-    #   window['__espnfitt__'] = {...};
-    #   window[\"__espnfitt__\"] = {...};
-    pattern = re.compile(
-        r"window\[(?:'|\\\")__espnfitt__(?:'|\\\")\]\s*=\s*({.*?})\s*;",
-        re.DOTALL,
-    )
-    match = pattern.search(script_text)
-    if not match:
-        raise ValueError("Found script tag but could not extract JSON for __espnfitt__")
-
-    json_str = match.group(1)
-    return json.loads(json_str)
 
 
 def _safe_get(obj: Any, path: List[Any], default: Any = None) -> Any:
@@ -90,7 +42,7 @@ def _safe_get(obj: Any, path: List[Any], default: Any = None) -> Any:
     return cur
 
 
-def _extract_teams_and_scores(game_json: Dict[str, Any]) -> Dict[str, Optional[Any]]:
+def _extract_teams_and_scores(summary: Dict[str, Any]) -> Dict[str, Optional[Any]]:
     """
     Extract home/away team names and scores from the game JSON.
 
@@ -98,7 +50,7 @@ def _extract_teams_and_scores(game_json: Dict[str, Any]) -> Dict[str, Optional[A
     on each competitor.
     """
     competitions0 = _safe_get(
-        game_json, ["header", "competitions", 0], default={}
+        summary, ["header", "competitions", 0], default={}
     ) or {}
     competitors = competitions0.get("competitors") or []
 
@@ -133,12 +85,12 @@ def _extract_teams_and_scores(game_json: Dict[str, Any]) -> Dict[str, Optional[A
     }
 
 
-def _extract_status_and_date(game_json: Dict[str, Any]) -> Dict[str, Optional[str]]:
+def _extract_status_and_date(summary: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """
     Extract game status (e.g. 'Final') and scheduled date/time.
     """
     competitions0 = _safe_get(
-        game_json, ["header", "competitions", 0], default={}
+        summary, ["header", "competitions", 0], default={}
     ) or {}
 
     status = _safe_get(
@@ -149,7 +101,7 @@ def _extract_status_and_date(game_json: Dict[str, Any]) -> Dict[str, Optional[st
 
     # The date is usually on the competition itself.
     date = competitions0.get("date") or _safe_get(
-        game_json,
+        summary,
         ["header", "competitions", 0, "date"],
         default=None,
     )
@@ -157,7 +109,7 @@ def _extract_status_and_date(game_json: Dict[str, Any]) -> Dict[str, Optional[st
     return {"game_status": status, "date": date}
 
 
-def _extract_location(game_json: Dict[str, Any]) -> Optional[str]:
+def _extract_location(summary: Dict[str, Any]) -> Optional[str]:
     """
     Build a human-readable location string from venue information.
 
@@ -165,7 +117,7 @@ def _extract_location(game_json: Dict[str, Any]) -> Optional[str]:
         "Crypto.com Arena, Los Angeles, CA"
     """
     competitions0 = _safe_get(
-        game_json, ["header", "competitions", 0], default={}
+        summary, ["header", "competitions", 0], default={}
     ) or {}
 
     venue = competitions0.get("venue") or {}
@@ -186,19 +138,19 @@ def _extract_location(game_json: Dict[str, Any]) -> Optional[str]:
     return ", ".join(parts)
 
 
-def _extract_referees(game_json: Dict[str, Any]) -> List[str]:
+def _extract_referees(summary: Dict[str, Any]) -> List[str]:
     """
     Extract referee names, if present.
 
     ESPN may list officials either under the competition or under gameInfo.
     """
     competitions0 = _safe_get(
-        game_json, ["header", "competitions", 0], default={}
+        summary, ["header", "competitions", 0], default={}
     ) or {}
 
     officials = (
         competitions0.get("officials")
-        or _safe_get(game_json, ["gameInfo", "officials"], default=[])
+        or _safe_get(summary, ["gameInfo", "officials"], default=[])
         or []
     )
 
@@ -213,7 +165,7 @@ def _extract_referees(game_json: Dict[str, Any]) -> List[str]:
     return names
 
 
-def _extract_betting(game_json: Dict[str, Any]) -> Dict[str, Optional[Any]]:
+def _extract_betting(summary: Dict[str, Any]) -> Dict[str, Optional[Any]]:
     """
     Extract opening spread/total and DraftKings-specific lines.
 
@@ -221,7 +173,7 @@ def _extract_betting(game_json: Dict[str, Any]) -> Dict[str, Optional[Any]]:
     - The 'pickcenter' structure and provider names are not guaranteed.
     - We use .get() everywhere so missing data just returns None.
     """
-    pickcenter = game_json.get("pickcenter") or []
+    pickcenter = summary.get("pickcenter") or []
 
     opening_spread: Optional[float] = None
     opening_total: Optional[float] = None
@@ -261,26 +213,19 @@ def _extract_betting(game_json: Dict[str, Any]) -> Dict[str, Optional[Any]]:
     }
 
 
-def parse_game(html: str, game_id: str) -> Dict[str, Any]:
+def parse_game(summary: Dict[str, Any], game_id: str) -> Dict[str, Any]:
     """
     Parse one ESPN NBA game page into a clean dictionary.
 
     This function does not make any network calls. It only:
-    - extracts the embedded ESPN JSON
-    - walks that JSON defensively
+    - walks the already-fetched ESPN summary JSON defensively
     - returns a flat dict you can save as JSON or insert into PostgreSQL
     """
-    root = _extract_espn_json(html)
-
-    # The main game data usually lives under the `gamepackageJSON` key.
-    # Fragility: if ESPN restructures this object, these paths must be updated.
-    game_json = root.get("gamepackageJSON") or {}
-
-    teams_scores = _extract_teams_and_scores(game_json)
-    status_date = _extract_status_and_date(game_json)
-    location = _extract_location(game_json)
-    referees = _extract_referees(game_json)
-    betting = _extract_betting(game_json)
+    teams_scores = _extract_teams_and_scores(summary)
+    status_date = _extract_status_and_date(summary)
+    location = _extract_location(summary)
+    referees = _extract_referees(summary)
+    betting = _extract_betting(summary)
 
     result: Dict[str, Any] = {
         "game_id": game_id,
