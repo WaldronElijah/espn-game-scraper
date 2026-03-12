@@ -10,7 +10,7 @@ overview: "Design an end-to-end architecture: ingest NBA stats from ESPN, clean 
 
 ```mermaid
 flowchart LR
-  sourceESPN[ESPN APIs] --> pythonIngest[Python Ingest & Clean]
+  sourceESPN[ESPN website] --> pythonIngest[Python Ingest & Clean]
   pythonIngest --> postgresDB[(Postgres)]
   postgresDB --> springAPI[Spring Boot REST API]
   springAPI --> nextApp[Next.js Frontend]
